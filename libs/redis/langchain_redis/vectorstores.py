@@ -190,9 +190,11 @@ class RedisVectorStore(VectorStore):
         datas = [
             {
                 self.config.content_field: text,
-                self.config.embedding_field: np.array(
-                    embedding, dtype=np.float32
-                ).tobytes(),
+                self.config.embedding_field: (
+                    np.array(embedding, dtype=np.float32).tobytes()
+                    if self.config.storage_type == "hash"
+                    else np.array(embedding, dtype=np.float32).tolist()
+                ),
                 **{
                     field_name: (
                         self.config.default_tag_separator.join(metadata[field_name])
@@ -372,7 +374,11 @@ class RedisVectorStore(VectorStore):
             # Fetch full hash data for each document
             pipe = self._index.client.pipeline()
             for doc in results:
-                pipe.hgetall(doc["id"])
+                if self.config.storage_type == "hash":
+                    pipe.hgetall(doc["id"])
+                else:
+                    pipe.json().get(doc["id"])
+                # self._index.fetch(doc["id"])
             full_docs = convert_bytes(pipe.execute())
 
             return [
@@ -481,10 +487,16 @@ class RedisVectorStore(VectorStore):
                 )
 
                 # Create a dictionary mapping document ids to their embeddings
-                doc_embeddings_dict = {
-                    doc_id: buffer_to_array(doc[self.config.embedding_field])
-                    for doc_id, doc in zip(doc_ids, docs_from_storage)
-                }
+                if self.config.storage_type == "hash":
+                    doc_embeddings_dict = {
+                        doc_id: buffer_to_array(doc[self.config.embedding_field])
+                        for doc_id, doc in zip(doc_ids, docs_from_storage)
+                    }
+                else:
+                    doc_embeddings_dict = {
+                        doc_id: doc[self.config.embedding_field]
+                        for doc_id, doc in zip(doc_ids, docs_from_storage)
+                    }
 
                 # Prepare the results with embeddings
                 docs_with_scores = [
@@ -540,25 +552,46 @@ class RedisVectorStore(VectorStore):
             # Fetch full hash data for each document
             pipe = self._index.client.pipeline()
             for doc in results:
-                pipe.hgetall(doc["id"])
+                if self.config.storage_type == "hash":
+                    pipe.hgetall(doc["id"])
+                else:
+                    pipe.json().get(doc["id"])
+                # self._index.fetch(doc["id"])
             full_docs = convert_bytes(pipe.execute())
 
             if with_vectors:
-                docs_with_scores = [
-                    (
-                        Document(
-                            page_content=doc[self.config.content_field],
-                            metadata={
-                                k: v
-                                for k, v in doc.items()
-                                if k != self.config.content_field
-                            },
-                        ),
-                        float(result.get("vector_distance", 0)),
-                        buffer_to_array(doc.get(self.config.embedding_field)),
-                    )
-                    for doc, result in zip(full_docs, results)
-                ]
+                if self.config.storage_type == "hash":
+                    docs_with_scores = [
+                        (
+                            Document(
+                                page_content=doc[self.config.content_field],
+                                metadata={
+                                    k: v
+                                    for k, v in doc.items()
+                                    if k != self.config.content_field
+                                },
+                            ),
+                            float(result.get("vector_distance", 0)),
+                            buffer_to_array(doc.get(self.config.embedding_field)),
+                        )
+                        for doc, result in zip(full_docs, results)
+                    ]
+                else:
+                    docs_with_scores = [
+                        (
+                            Document(
+                                page_content=doc[self.config.content_field],
+                                metadata={
+                                    k: v
+                                    for k, v in doc.items()
+                                    if k != self.config.content_field
+                                },
+                            ),
+                            float(result.get("vector_distance", 0)),
+                            doc.get(self.config.embedding_field),
+                        )
+                        for doc, result in zip(full_docs, results)
+                    ]
             else:
                 docs_with_scores = [
                     cast(  # type: ignore[misc]
